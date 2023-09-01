@@ -32,6 +32,8 @@ class BodyEnvironment(gym.Env):
       rotation_speed = self.rotation_speed * (1 if action == 3 else -1)
       self.robot_angle = (self.robot_angle + rotation_speed) % 360
       return self.get_observation(), -1, False, {}
+    else:
+      raise ValueError(f"Invalid action: {action}")
 
   def reset(self):
     while True:

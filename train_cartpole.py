@@ -20,6 +20,7 @@ GAMMA = 0.9
 TARGET_UPDATE_INTERVAL = 10
 REPORT_INTERVAL = 100
 RENDER_INTERVAL = 0
+PPO = False
 
 class ReplayMemory:
     def __init__(self, capacity = None):
@@ -45,15 +46,18 @@ class ReplayMemory:
 
 class CartPoleAgent(nn.Module):
     def __init__(self):
-        super(CartPoleAgent, self).__init__()
+        super().__init__()
         self.fc1 = nn.Linear(INPUT_SIZE, HIDDEN_LAYER_SIZE)
         self.fc2 = nn.Linear(HIDDEN_LAYER_SIZE, HIDDEN_LAYER_SIZE // 2)
-        self.output = nn.Linear(HIDDEN_LAYER_SIZE // 2, OUTPUT_SIZE)
+        self.values = nn.Linear(HIDDEN_LAYER_SIZE // 2, OUTPUT_SIZE)
+        self.policy = nn.Linear(HIDDEN_LAYER_SIZE // 2, OUTPUT_SIZE)
 
-    def forward(self, inputs):
-        x = F.relu(self.fc1(inputs.float()))
-        x = F.relu(self.fc2(x))
-        return F.softmax(self.output(x), dim=-1)
+    def forward(self, x):
+        x = self.fc1(x).relu()
+        x = self.fc2(x).relu()
+        q = self.values(x)
+        p = self.policy(x).softmax(dim=-1)
+        return q, p
 
 # class CartPoleAgent(nn.Module):
 #     def __init__(self):
@@ -78,7 +82,7 @@ class EnvWrapper:
   def reset(self): return self.prepare(*self.env.reset())
   def step(self, *args): return self.prepare(*self.env.step(*args))
   def prepare(self, img, *ret):
-    return torch.as_tensor(img), *ret
+    return torch.tensor(img), *ret
     img = cv2.resize(img, (84, 84))
     img = torch.from_numpy(img).permute(2, 0, 1).float() / 255
     return img, *ret
@@ -116,7 +120,7 @@ if __name__ == '__main__':
     env = gym.make('CartPole-v1', render_mode='rgb_array')
     env = EnvWrapper(env)
     memory = ReplayMemory(MEMORY_SIZE)
-    episode_lengths, avg_episode_length = [], 0
+    episode_lengths, avg_episode_length, eps = [], 0, 0
 
     for episode_counter in range(1, NUM_EPISODES + 1):
         episode = []
@@ -125,10 +129,19 @@ if __name__ == '__main__':
         # Run an episode
         for step in count():
             with torch.no_grad():
-                policy = agent(state[None].to(device)).cpu()
-            action = Categorical(policy).sample()
+                values, policy = agent(state[None].to(device))
+
+            if PPO:
+                action = Categorical(policy.cpu()).sample()
+            else:
+                eps = max(0.01, 1 - episode_counter / NUM_EPISODES)
+                if random.random() < eps:
+                      action = torch.tensor(env.env.action_space.sample())[None]
+                else: action = values.argmax()[None]
+
             next_state, reward, done, truncated, stats = env.step(action.item())
-            episode.append((state, action, reward))
+            reward = -1 if done else 0
+            episode.append((state, action, torch.tensor(reward), next_state, torch.tensor(done)))
             state = next_state
 
             if RENDER_INTERVAL and episode_counter % RENDER_INTERVAL == 0:
@@ -136,28 +149,34 @@ if __name__ == '__main__':
             if done or truncated: break
 
         # When the episode finishes, reset the environment and update the agent
-        episode_lengths.append(step + 1.)
-        discount_rewards(episode, GAMMA, normalize=False)
+        if PPO: discount_rewards(episode, GAMMA, normalize=False)
         memory.push_episode(episode)
+        episode_lengths.append(step + 1.)
 
         if len(memory) > BATCH_SIZE * 4:
             if episode_counter % TARGET_UPDATE_INTERVAL == 0:
                 old_agent.load_state_dict(agent.state_dict())
 
-            inputs, actions, rewards = memory.sample(BATCH_SIZE)
-            rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
+            states, actions, rewards, next_states, dones = memory.sample(BATCH_SIZE)
+            values, probs = agent(states.to(device))
+            action_values, action_probs = values.cpu().gather(1, actions), probs.cpu().gather(1, actions)
 
-            probs = agent(inputs.to(device)).cpu()
-            with torch.no_grad():
-              old_probs = old_agent(inputs.to(device)).cpu()
-            action_probs = torch.gather(probs, 1, actions)
-            old_action_probs = torch.gather(old_probs, 1, actions)
-
-            ratio = action_probs / (old_action_probs + 1e-5)
-            clamped_ratio = torch.clamp(ratio, 1. - EPSILON, 1. + EPSILON)
-            policy_loss = -torch.min(ratio * rewards, clamped_ratio * rewards).mean()
-            entropy_loss = (probs * probs.log()).sum(dim=1).mean()
-            loss = policy_loss + 1e-4 * entropy_loss
+            if PPO:
+                with torch.no_grad():
+                    _, old_probs = old_agent(states.to(device))
+                    old_action_probs = old_probs.cpu().gather(1, actions)
+                rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
+                ratio = action_probs / (old_action_probs + 1e-5)
+                clamped_ratio = torch.clamp(ratio, 1. - EPSILON, 1. + EPSILON)
+                policy_loss = -torch.min(ratio * rewards, clamped_ratio * rewards).mean()
+                entropy_loss = (probs * probs.log()).sum(dim=1).mean()
+                loss = policy_loss # + 1e-4 * entropy_loss
+            else:
+                with torch.no_grad():
+                    next_values, _ = agent(next_states.to(device))
+                best_future_values = next_values.max(dim=-1).values * ~dones
+                target_values = (rewards + GAMMA * best_future_values)[:,None]
+                loss = F.smooth_l1_loss(action_values, target_values)
 
             optimizer.zero_grad()
             loss.backward()
@@ -166,5 +185,5 @@ if __name__ == '__main__':
         # Report stats every so often
         if episode_counter % REPORT_INTERVAL == 0:
             avg_episode_length = torch.tensor(episode_lengths).mean()
-            print("Episode {:<4} | Avg episode length: {:.2f}".format(episode_counter, avg_episode_length))
+            print(f"Episode {episode_counter:<4} | Avg episode length: {avg_episode_length:.2f} | Epsilon: {eps:.3f}")
             episode_lengths = []

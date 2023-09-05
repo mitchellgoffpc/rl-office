@@ -3,6 +3,8 @@ import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision
+import numpy as np
 import gymnasium as gym
 from itertools import count
 from torch.distributions.categorical import Categorical
@@ -10,14 +12,15 @@ from torch.distributions.categorical import Categorical
 INPUT_SIZE = 4
 OUTPUT_SIZE = 2
 
-NUM_EPISODES = 2000
+NUM_EPISODES = 4000
 MEMORY_SIZE = 32000
-BATCH_SIZE = 128
+BATCH_SIZE = 512
 HIDDEN_LAYER_SIZE = 128
+HISTORY_SIZE = 4
 LEARNING_RATE = 0.0003
 EPSILON = 0.1
 GAMMA = 0.9
-TARGET_UPDATE_INTERVAL = 10
+TARGET_UPDATE_INTERVAL = 3
 REPORT_INTERVAL = 100
 RENDER_INTERVAL = 0
 PPO = False
@@ -44,17 +47,67 @@ class ReplayMemory:
         sample = random.sample(self.memory, batch_size)
         return map(torch.stack, zip(*sample))
 
+class EnvWrapper:
+  def __init__(self, env): self.env = env
+  def render(self): return self.env.render()
+  def reset(self): return self.prepare(*self.env.reset())
+  def step(self, *args): return self.prepare(*self.env.step(*args))
+  def prepare(self, img, *ret):
+    # return torch.tensor(img), *ret
+    img = env.render()
+    img = cv2.resize(img, (84, 84))
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    img = torch.as_tensor(img).float() / 255
+    return img, *ret
+
+class FrameStack:
+  def __init__(self, env):
+    self.env = env
+    self.memory = []
+
+  def render(self): return self.env.render()
+  def reset(self):
+    img, *ret = self.env.reset()
+    self.memory = [img]*HISTORY_SIZE
+    return torch.stack(self.memory, dim=0), *ret
+
+  def step(self, *args):
+    img, *ret = self.env.step(*args)
+    self.memory.append(img)
+    self.memory = self.memory[-HISTORY_SIZE:]
+    return torch.stack(self.memory, dim=0), *ret
+
+
+# class CartPoleAgent(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.fc1 = nn.Linear(INPUT_SIZE, HIDDEN_LAYER_SIZE)
+#         self.fc2 = nn.Linear(HIDDEN_LAYER_SIZE, HIDDEN_LAYER_SIZE // 2)
+#         self.values = nn.Linear(HIDDEN_LAYER_SIZE // 2, OUTPUT_SIZE)
+#         self.policy = nn.Linear(HIDDEN_LAYER_SIZE // 2, OUTPUT_SIZE)
+#
+#     def forward(self, x):
+#         x = self.fc1(x).relu()
+#         x = self.fc2(x).relu()
+#         q = self.values(x)
+#         p = self.policy(x).softmax(dim=-1)
+#         return q, p
+
 class CartPoleAgent(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fc1 = nn.Linear(INPUT_SIZE, HIDDEN_LAYER_SIZE)
-        self.fc2 = nn.Linear(HIDDEN_LAYER_SIZE, HIDDEN_LAYER_SIZE // 2)
-        self.values = nn.Linear(HIDDEN_LAYER_SIZE // 2, OUTPUT_SIZE)
-        self.policy = nn.Linear(HIDDEN_LAYER_SIZE // 2, OUTPUT_SIZE)
+        self.conv1 = nn.Conv2d(HISTORY_SIZE, 32, 8, stride=4)
+        self.conv2 = nn.Conv2d(32, 64, 4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, 3, stride=1)
+        self.fc1 = nn.Linear(64 * 7 * 7, 512)
+        self.values = nn.Linear(512, OUTPUT_SIZE)
+        self.policy = nn.Linear(512, OUTPUT_SIZE)
 
     def forward(self, x):
+        x = self.conv1(x).relu()
+        x = self.conv2(x).relu()
+        x = self.conv3(x).relu().flatten(start_dim=1)
         x = self.fc1(x).relu()
-        x = self.fc2(x).relu()
         q = self.values(x)
         p = self.policy(x).softmax(dim=-1)
         return q, p
@@ -62,30 +115,22 @@ class CartPoleAgent(nn.Module):
 # class CartPoleAgent(nn.Module):
 #     def __init__(self):
 #         super().__init__()
-#         self.conv1 = nn.Conv2d(3, 32, 8, stride=4)
-#         self.conv2 = nn.Conv2d(32, 64, 4, stride=2)
-#         self.conv3 = nn.Conv2d(64, 64, 3, stride=1)
-#         self.fc1 = nn.Linear(64 * 7 * 7, 512)
-#         self.fc2 = nn.Linear(512, OUTPUT_SIZE)
+#         resnet = torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.DEFAULT)
+#         self.conv1 = nn.Conv2d(HISTORY_SIZE, 64, kernel_size=7, stride=2, padding=3, bias=False)
+#         self.backbone = nn.Sequential(*list(resnet.children())[1:-1])
+#         self.fc1 = nn.Linear(512, 512)
+#         self.values = nn.Linear(512, OUTPUT_SIZE)
+#         self.policy = nn.Linear(512, OUTPUT_SIZE)
+#         self.conv1.weight.data[:,:3] = list(resnet.children())[0].weight.data
 #
 #     def forward(self, x):
-#         x = self.conv1(x).relu()
-#         x = self.conv2(x).relu()
-#         x = self.conv3(x).relu().flatten(start_dim=1)
+#         x = self.conv1(x)
+#         x = self.backbone(x).flatten(start_dim=1)
 #         x = self.fc1(x).relu()
-#         x = self.fc2(x).softmax(dim=-1)
-#         return x
+#         q = self.values(x)
+#         p = self.policy(x).softmax(dim=-1)
+#         return q, p
 
-class EnvWrapper:
-  def __init__(self, env): self.env = env
-  def render(self): return self.env.render()
-  def reset(self): return self.prepare(*self.env.reset())
-  def step(self, *args): return self.prepare(*self.env.step(*args))
-  def prepare(self, img, *ret):
-    return torch.tensor(img), *ret
-    img = cv2.resize(img, (84, 84))
-    img = torch.from_numpy(img).permute(2, 0, 1).float() / 255
-    return img, *ret
 
 screen = None
 def draw(img):
@@ -112,13 +157,13 @@ def discount_rewards(episode, gamma, normalize=False):
 # Training
 
 if __name__ == '__main__':
-    device = torch.device('cpu')
+    device = torch.device('mps')
     agent = CartPoleAgent().to(device)
     old_agent = CartPoleAgent().to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=LEARNING_RATE)
 
     env = gym.make('CartPole-v1', render_mode='rgb_array')
-    env = EnvWrapper(env)
+    env = FrameStack(EnvWrapper(env))
     memory = ReplayMemory(MEMORY_SIZE)
     episode_lengths, avg_episode_length, eps = [], 0, 0
 
@@ -134,10 +179,10 @@ if __name__ == '__main__':
             if PPO:
                 action = Categorical(policy.cpu()).sample()
             else:
-                eps = max(0.01, 1 - episode_counter / NUM_EPISODES)
+                eps = max(0.01, 1 - episode_counter / (NUM_EPISODES / 2))
                 if random.random() < eps:
-                      action = torch.tensor(env.env.action_space.sample())[None]
-                else: action = values.argmax()[None]
+                      action = torch.tensor(env.env.env.action_space.sample())[None]
+                else: action = values.cpu().argmax()[None]
 
             next_state, reward, done, truncated, stats = env.step(action.item())
             reward = -1 if done else 0
@@ -145,7 +190,7 @@ if __name__ == '__main__':
             state = next_state
 
             if RENDER_INTERVAL and episode_counter % RENDER_INTERVAL == 0:
-                draw(cv2.resize(env.render(), (84, 84)))
+                draw((state.numpy().transpose(1, 2, 0) * 255).astype(np.uint8))
             if done or truncated: break
 
         # When the episode finishes, reset the environment and update the agent
@@ -162,20 +207,21 @@ if __name__ == '__main__':
             action_values, action_probs = values.cpu().gather(1, actions), probs.cpu().gather(1, actions)
 
             if PPO:
+                rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
                 with torch.no_grad():
                     _, old_probs = old_agent(states.to(device))
-                    old_action_probs = old_probs.cpu().gather(1, actions)
-                rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
+                old_action_probs = old_probs.cpu().gather(1, actions)
                 ratio = action_probs / (old_action_probs + 1e-5)
                 clamped_ratio = torch.clamp(ratio, 1. - EPSILON, 1. + EPSILON)
                 policy_loss = -torch.min(ratio * rewards, clamped_ratio * rewards).mean()
                 entropy_loss = (probs * probs.log()).sum(dim=1).mean()
-                loss = policy_loss # + 1e-4 * entropy_loss
+                loss = policy_loss + 1e-4 * entropy_loss
             else:
                 with torch.no_grad():
-                    next_values, _ = agent(next_states.to(device))
-                best_future_values = next_values.max(dim=-1).values * ~dones
+                    next_values, _ = old_agent(next_states.to(device))
+                best_future_values = next_values.cpu().max(dim=-1).values * ~dones
                 target_values = (rewards + GAMMA * best_future_values)[:,None]
+                assert action_values.shape == target_values.shape
                 loss = F.smooth_l1_loss(action_values, target_values)
 
             optimizer.zero_grad()

@@ -35,14 +35,14 @@ class ReplayBuffer:
 class BodyModel(nn.Module):
   def __init__(self, hidden_size):
     super().__init__()
-    resnet = torchvision.models.resnet50(weights=torchvision.models.ResNet50_Weights.DEFAULT)
-    self.backbone = nn.Sequential(*list(resnet.children())[:-1])
-    self.fc1 = nn.Linear(2048, hidden_size)
+    # resnet = torchvision.models.resnet50(weights=torchvision.models.ResNet50_Weights.DEFAULT)
+    # self.backbone = nn.Sequential(*list(resnet.children())[:-1])
+    self.fc1 = nn.Linear(1, hidden_size)
     self.fc2 = nn.Linear(hidden_size, NUM_ACTIONS)
   
   def forward(self, x):
-    x = self.backbone(x).flatten(start_dim=1)
-    x = self.fc1(x).relu()
+    # x = self.backbone(x).flatten(start_dim=1)
+    x = self.fc1(x / 100).relu()
     x = self.fc2(x)
     return x
 
@@ -53,7 +53,7 @@ def train():
   replay_buffer = ReplayBuffer(LT_BUFFER_SIZE)
   short_term_buffer = deque()
   state = env.reset()
-  state = np.transpose(state, (2, 0, 1)).astype(np.float32) / 255.0
+  # state = np.transpose(state, (2, 0, 1)).astype(np.float32) / 255.0
 
   model = BodyModel(HIDDEN_SIZE).to(device)
   target_model = BodyModel(HIDDEN_SIZE).to(device).eval()
@@ -70,7 +70,7 @@ def train():
       action = torch.distributions.Categorical(probs).sample().item()
     next_state, reward, _, _ = env.step(action)
     short_term_buffer.append((state, action, reward))
-    state = np.transpose(next_state, (2, 0, 1)).astype(np.float32) / 255.0
+    # state = np.transpose(next_state, (2, 0, 1)).astype(np.float32) / 255.0
     rewards.append(reward)
 
     # REINFORCE

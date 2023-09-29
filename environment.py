@@ -45,7 +45,7 @@ class BodyEnvironment(gym.Env):
     return self.get_observation()
 
   def get_observation(self):
-    return np.array([self.calculate_distance_to_wall(self.robot_pos)])
+    return np.array([self.calculate_distance_to_wall(self.robot_pos)], dtype=np.float32)
 
 
   # Helper functions

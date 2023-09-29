@@ -3,6 +3,7 @@ import math
 import numpy as np
 import gymnasium as gym
 
+
 class BodyEnvironment(gym.Env):
   def __init__(self):
     super().__init__()
@@ -44,6 +45,46 @@ class BodyEnvironment(gym.Env):
     return self.get_observation()
 
   def get_observation(self):
+    return np.array([self.calculate_distance_to_wall(self.robot_pos)])
+
+
+  # Helper functions
+  def calculate_distance_to_wall(self, origin):
+    direction = np.array([math.cos(math.radians(self.robot_angle)), math.sin(math.radians(self.robot_angle))])
+
+    outer_intersections = [(self.outer_size - origin[i]) / direction[i] if direction[i] > 0 else
+                           -origin[i] / direction[i] if direction[i] < 0 else np.inf for i in range(2)]
+
+    center = (self.outer_size / 2, self.outer_size / 2)
+    square_bounds = np.array([center[0] - self.inner_size / 2, center[1] - self.inner_size / 2,
+                              center[0] + self.inner_size / 2, center[1] + self.inner_size / 2])
+    
+    tmin = (square_bounds[[0,1]] - origin) / direction
+    tmax = (square_bounds[[2,3]] - origin) / direction
+
+    if tmin[0] > tmax[0]: tmin[0], tmax[0] = tmax[0], tmin[0]
+    if tmin[1] > tmax[1]: tmin[1], tmax[1] = tmax[1], tmin[1]
+
+    if tmin[0] < tmax[1] and tmin[1] < tmax[0] and min(tmax) > 0:
+        inner_intersection = max(tmin) if max(tmin) >= 0 else min(tmax)
+    else:
+        inner_intersection = float('inf')
+
+    return min(*outer_intersections, inner_intersection)
+
+  def check_collision(self, pos):
+    if pos[0] < 0 or pos[0] > self.outer_size or pos[1] < 0 or pos[1] > self.outer_size:  # Outer square collision
+      return True
+    inner_square_start = (self.outer_size - self.inner_size) / 2
+    inner_square_end = (self.outer_size + self.inner_size) / 2
+    if inner_square_start < pos[0] < inner_square_end and inner_square_start < pos[1] < inner_square_end:  # Inner square collision
+      return True
+    return False
+
+  
+  # Rendering functions
+  
+  def get_image_observation(self):
     margin = int(self.outer_size / 2)
     img_size = self.outer_size + 2 * margin
     inner_margin = int((self.outer_size - self.inner_size) / 2)
@@ -69,15 +110,6 @@ class BodyEnvironment(gym.Env):
                       img_size//2 - crop_margin : img_size//2 + crop_margin]
 
     return cv2.resize(cropped_img, tuple(self.observation_space.shape[:2]))
-
-  def check_collision(self, pos):
-    if pos[0] < 0 or pos[0] > self.outer_size or pos[1] < 0 or pos[1] > self.outer_size:  # Outer square collision
-      return True
-    inner_square_start = (self.outer_size - self.inner_size) / 2
-    inner_square_end = (self.outer_size + self.inner_size) / 2
-    if inner_square_start < pos[0] < inner_square_end and inner_square_start < pos[1] < inner_square_end:  # Inner square collision
-      return True
-    return False
   
   def render(self):
     # Scale factors for rendering
@@ -109,15 +141,18 @@ class BodyEnvironment(gym.Env):
     return img
 
 
+
 if __name__ == '__main__':
   import pygame
   pygame.init()
   screen = pygame.display.set_mode((256, 256))
   clock = pygame.time.Clock()
+  font = pygame.font.Font(None, 16)
+
   env = BodyEnvironment()
   observation = env.reset()
-
   running = True
+
   while running:
     for event in pygame.event.get():
       if event.type == pygame.QUIT:
@@ -134,11 +169,17 @@ if __name__ == '__main__':
           env.reset()
         break
 
+    # Draw environment
     screen.fill((255, 255, 255))
     img = env.render()
     img = np.transpose(img, (1, 0, 2))
     img = pygame.surfarray.make_surface(img)
     screen.blit(img, (0, 0))
+
+    dist_to_wall = env.get_observation()[0]
+    text = font.render(f"Distance to wall: {dist_to_wall:.2f}", True, (0, 0, 0))
+    screen.blit(text, (5, 5))
+
     pygame.display.flip()
     clock.tick(60)
 

@@ -26,13 +26,13 @@ class BodyEnvironment(gym.Env):
       new_pos = (self.robot_pos[0] + movement_speed * math.cos(math.radians(self.robot_angle)),
                  self.robot_pos[1] + movement_speed * math.sin(math.radians(self.robot_angle)))
       if self.check_collision(new_pos):
-        return self.get_observation(), -100, False, {}
+        return self.get_observation(), -1, False, {}
       self.robot_pos = new_pos
-      return self.get_observation(), 1, False, {}
+      return self.get_observation(), 0.01, False, {}
     elif action in (2, 3):  # Rotate right or left
       rotation_speed = self.rotation_speed * (1 if action == 3 else -1)
       self.robot_angle = (self.robot_angle + rotation_speed) % 360
-      return self.get_observation(), -1, False, {}
+      return self.get_observation(), -0.01, False, {}
     else:
       raise ValueError(f"Invalid action: {action}")
 
@@ -58,7 +58,7 @@ class BodyEnvironment(gym.Env):
     center = (self.outer_size / 2, self.outer_size / 2)
     square_bounds = np.array([center[0] - self.inner_size / 2, center[1] - self.inner_size / 2,
                               center[0] + self.inner_size / 2, center[1] + self.inner_size / 2])
-    
+
     tmin = (square_bounds[[0,1]] - origin) / direction
     tmax = (square_bounds[[2,3]] - origin) / direction
 
@@ -81,9 +81,9 @@ class BodyEnvironment(gym.Env):
       return True
     return False
 
-  
+
   # Rendering functions
-  
+
   def get_image_observation(self):
     margin = int(self.outer_size / 2)
     img_size = self.outer_size + 2 * margin
@@ -92,13 +92,13 @@ class BodyEnvironment(gym.Env):
     # Draw the environment
     img = np.zeros((img_size, img_size, 3), dtype=np.uint8)
     cv2.rectangle(img, (margin, margin), (img_size - margin, img_size - margin), (255, 255, 255), -1)
-    cv2.rectangle(img, (margin + inner_margin, margin + inner_margin), 
-                  (img_size - margin - inner_margin, img_size - margin - inner_margin), 
+    cv2.rectangle(img, (margin + inner_margin, margin + inner_margin),
+                  (img_size - margin - inner_margin, img_size - margin - inner_margin),
                   (0, 0, 0), -1)
 
     robot_pos_in_img = (int(self.robot_pos[0] + margin), int(self.robot_pos[1] + margin))
     cv2.circle(img, robot_pos_in_img, 20, (0, 0, 255), -1)
-    
+
     # Shift, rotate, crop, and resize the image
     M = np.float32([[1, 0, self.outer_size/2 - self.robot_pos[0]], [0, 1, self.outer_size/2 - self.robot_pos[1]]])
     img = cv2.warpAffine(img, M, (img_size, img_size))
@@ -110,7 +110,7 @@ class BodyEnvironment(gym.Env):
                       img_size//2 - crop_margin : img_size//2 + crop_margin]
 
     return cv2.resize(cropped_img, tuple(self.observation_space.shape[:2]))
-  
+
   def render(self):
     # Scale factors for rendering
     img_size = 256
@@ -122,12 +122,12 @@ class BodyEnvironment(gym.Env):
     outer_rect_end_point = (int(self.outer_size * scale_factor - 1), int(self.outer_size * scale_factor - 1))
     inner_rect_start_point = (int(scale_factor * (self.outer_size - self.inner_size) / 2), int(scale_factor * (self.outer_size - self.inner_size) / 2))
     inner_rect_end_point = (int(scale_factor * (self.outer_size + self.inner_size) / 2 - 1), int(scale_factor * (self.outer_size + self.inner_size) / 2 - 1))
-    
+
     # Draw the environment
     img = np.zeros((img_size, img_size, 3), dtype=np.uint8)
     cv2.rectangle(img, outer_rect_start_point, outer_rect_end_point, (255, 255, 255), -1)
     cv2.rectangle(img, inner_rect_start_point, inner_rect_end_point, (0, 0, 0), -1)
-    
+
     # Draw a triangle for the robot
     direction_vector = np.array([math.cos(math.radians(self.robot_angle)),
                                  math.sin(math.radians(self.robot_angle))])

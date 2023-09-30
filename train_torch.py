@@ -17,6 +17,7 @@ MAX_EPISODE_LEN = 200
 REPORT_INTERVAL = 50
 TARGET_UPDATE_INTERVAL = 10
 GAMMA = 0.9
+ENTROPY_BETA = 1e-4
 
 class ActorCritic(nn.Module):
     def __init__(self):
@@ -91,7 +92,11 @@ def main():
                 action_probs = torch.clip(action_probs, 0.01, 1)  # probs nan out without this :(
                 advantages = (target_values - state_values).detach()
                 actor_loss = -torch.mean(torch.log(action_probs) * advantages)
-                loss = actor_loss + critic_loss
+
+                entropy = -torch.sum(probs * torch.log(probs + 1e-5), dim=-1)
+                entropy_loss = -ENTROPY_BETA * entropy.mean()
+
+                loss = actor_loss + critic_loss + entropy_loss
                 ep_loss += loss.item()
 
                 optimizer.zero_grad()

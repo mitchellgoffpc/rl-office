@@ -43,8 +43,8 @@ class ActorCritic:
 
     def __call__(self, x):
         x = x / 100
-        x = self.fc1(x).relu()
-        x = self.fc2(x).relu()
+        x = self.fc1(x).tanh()
+        x = self.fc2(x).tanh()
         return self.actor(x).softmax(-1), self.critic(x)
 
 
@@ -69,12 +69,12 @@ def main():
     def compute_loss(states, action_mask, rewards, next_states, dones):
         probs, state_values = model(states)
         _, next_state_values = model(next_states)
-        target_values = (rewards + (1 - dones) * next_state_values[:,0] * GAMMA)[:,None]
+        target_values = (rewards + (1 - dones) * next_state_values[:,0].detach() * GAMMA)[:,None]
         critic_loss = (state_values - target_values).pow(2).mean()
 
         action_probs = (probs * action_mask).sum(-1)[:,None]
         action_probs = action_probs.clip(0.01, 1)  # probs nan out without this :(
-        advantages = target_values - state_values
+        advantages = (target_values - state_values).detach()
         actor_loss = -(action_probs.log() * advantages).mean()
 
         entropy = -(probs * (probs + 1e-5).log()).sum(-1)
@@ -94,7 +94,7 @@ def main():
         ep_loss, ep_reward, ep_bumps = 0, 0, 0
 
         for step in range(MAX_EPISODE_LEN):
-            probs, _ = jitmodel(Tensor(state)[None])
+            probs, _ = jitmodel(Tensor(state[None]))
             action = np.random.choice(4, p=probs.numpy()[0])
 
             next_state, reward, done, _ = env.step(action)

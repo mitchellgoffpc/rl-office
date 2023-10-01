@@ -89,7 +89,8 @@ def main():
             if len(buffer) >= BATCH_SIZE:
                 states, actions, rewards, next_states, dones = (torch.tensor(x) for x in buffer.sample(BATCH_SIZE))
                 probs, state_values = model(states)
-                _, next_state_values = model(next_states)
+                with torch.no_grad():
+                  _, next_state_values = model(next_states)
                 target_values = (rewards + (~dones) * next_state_values.squeeze(-1) * GAMMA)[:,None]
                 critic_loss = F.mse_loss(state_values, target_values)
 

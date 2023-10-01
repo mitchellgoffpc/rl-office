@@ -22,15 +22,20 @@ ENTROPY_BETA = 1e-4
 class ActorCritic(nn.Module):
     def __init__(self):
         super(ActorCritic, self).__init__()
-        self.fc1 = nn.Linear(HISTORY_LEN, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.actor = nn.Linear(64, 4)
-        self.critic = nn.Linear(64, 1)
+        self.fc1 = self._init_weights(nn.Linear(HISTORY_LEN, 64), std=np.sqrt(2))
+        self.fc2 = self._init_weights(nn.Linear(64, 64), std=np.sqrt(2))
+        self.actor = self._init_weights(nn.Linear(64, 4), std=0.01)
+        self.critic = self._init_weights(nn.Linear(64, 1), std=0.01)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x / 100))
-        x = F.relu(self.fc2(x))
+        x = F.tanh(self.fc1(x / 100))
+        x = F.tanh(self.fc2(x))
         return F.softmax(self.actor(x), dim=-1), self.critic(x)
+
+    def _init_weights(self, module, std=np.sqrt(2), bias_const=0.0):
+        torch.nn.init.orthogonal_(module.weight, std)
+        torch.nn.init.constant_(module.bias, bias_const)
+        return module
 
 class ReplayBuffer:
     def __init__(self, capacity):

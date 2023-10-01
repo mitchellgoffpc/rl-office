@@ -1,114 +1,132 @@
 import random
 import numpy as np
-from tqdm import tqdm
 from itertools import count
 from collections import deque
-
 from tinygrad.tensor import Tensor
 from tinygrad.jit import TinyJit
 from tinygrad.nn import Linear
-from tinygrad.nn.optim import Adam
-from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict
-from efficientnet import EfficientNet
+from tinygrad.nn.optim import Adam, get_parameters
 from environment import BodyEnvironment
+from wrappers import FrameStack
 
-BATCH_SIZE = 32
-BUFFER_SIZE = 100
-HIDDEN_SIZE = 128
-CLIP_EPSILON = 0.2
-GAMMA = 0.99
-NUM_ACTIONS = 4
+LEARNING_RATE = 0.0003
+BATCH_SIZE = 128
+REPLAY_SIZE = 128000
+NUM_EPISODES = 1000
+HISTORY_LEN = 20
+MAX_EPISODE_LEN = 200
+REPORT_INTERVAL = 50
+TARGET_UPDATE_INTERVAL = 10
+GAMMA = 0.9
+ENTROPY_BETA = 1e-4
 
 class ReplayBuffer:
-  def __init__(self, max_size=1000000):
-    self.buffer = deque(maxlen=max_size)
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
 
-  def __len__(self):
-    return len(self.buffer)
+    def __len__(self):
+        return len(self.buffer)
 
-  def push(self, state, action, reward):
-    self.buffer.append((state, action, reward))
+    def push(self, *args):
+        self.buffer.append(args)
 
-  def sample(self, batch_size):
-    states, actions, rewards = zip(*random.sample(self.buffer, batch_size))
-    return np.stack(states), np.array(actions), np.array(rewards)
+    def sample(self, batch_size):
+        state, action, reward, next_state, done = zip(*random.sample(self.buffer, batch_size))
+        return np.array(state), np.array(action), np.array(reward, dtype=np.float32), np.array(next_state), np.array(done)
 
-class BodyModel:
-  def __init__(self, hidden_size):
-    self.backbone = EfficientNet(0, has_fc_output=False)
-    self.backbone.load_from_pretrained()
-    self.fc1 = Linear(1280, hidden_size)
-    self.fc2 = Linear(hidden_size, NUM_ACTIONS)
-  
-  def __call__(self, x:Tensor) -> Tensor:
-    x = self.backbone(x)
-    x = self.fc1(x).relu()
-    x = self.fc2(x)
-    return x
+class ActorCritic:
+    def __init__(self):
+        self.fc1 = Linear(HISTORY_LEN, 64)
+        self.fc2 = Linear(64, 64)
+        self.actor = Linear(64, 4)
+        self.critic = Linear(64, 1)
 
-
-def train():
-  env = BodyEnvironment()
-  replay_buffer = ReplayBuffer()
-  short_term_buffer = deque()
-  state = env.reset()
-  state = np.transpose(state, (2, 0, 1))
-
-  _model = BodyModel(HIDDEN_SIZE)
-  _target_model = BodyModel(HIDDEN_SIZE)
-  load_state_dict(_target_model, get_state_dict(_model))
-  optimizer = Adam(get_parameters(_model))
-
-  @TinyJit
-  def model(x):
-    return _model(x).realize()
-  
-  # @TinyJit
-  def compute_loss(states, actions, advantages):
-    # Compute the log probabilities for the actions taken by the model
-    log_probs = _model(states).log_softmax().gather(actions[:,None], dim=1) * advantages
-    Tensor.no_grad = True
-    old_log_probs = _target_model(states).log_softmax(actions).gather(actions[:,None], dim=1)
-    Tensor.no_grad = False
-
-    # Compute the clipped surrogate loss
-    ratio = (log_probs - old_log_probs).exp()
-    surrogate_loss = ratio * advantages
-    clipped_ratio = ratio.clip(1.0 - CLIP_EPSILON, 1.0 + CLIP_EPSILON)
-    clipped_surrogate_loss = clipped_ratio * advantages
-
-    # Compute the policy loss as the minimum of the surrogate loss and the clipped surrogate loss
-    return -surrogate_loss.minimum(clipped_surrogate_loss).mean().realize()
-
-  # while True:
-  for _ in tqdm(count()):
-    # Take a step
-    action = model(Tensor(state[None])).numpy().argmax()
-    next_state, reward, _, _ = env.step(action)
-    next_state = np.transpose(next_state, (2, 0, 1))
-    short_term_buffer.append((state, action, reward))
-    state = next_state
-
-    # REINFORCE
-    R = reward
-    for i in range(len(short_term_buffer)-2, 0, -1):
-      R = GAMMA * R
-      s, a, r = short_term_buffer[i]
-      short_term_buffer[i] = (s, a, r+R)
-    
-    if len(short_term_buffer) > BUFFER_SIZE:
-      replay_buffer.push(*short_term_buffer.popleft())
-    
-    # Train
-    if len(replay_buffer) > BATCH_SIZE:
-      # Optimize the model
-      states, actions, advantages = (Tensor(x) for x in replay_buffer.sample(BATCH_SIZE))
-      loss = compute_loss(states, actions, advantages)
-      
-      optimizer.zero_grad()
-      loss.backward()
-      optimizer.step()
+    def __call__(self, x):
+        x = x / 100
+        x = self.fc1(x).relu()
+        x = self.fc2(x).relu()
+        return self.actor(x).softmax(-1), self.critic(x)
 
 
-if __name__ == '__main__':
-  train()
+def main():
+    model = ActorCritic()
+    optimizer = Adam(get_parameters(model), lr=LEARNING_RATE)
+    env = BodyEnvironment()
+    env = FrameStack(env, HISTORY_LEN)
+    buffer = ReplayBuffer(REPLAY_SIZE)
+
+    loss_deque = deque(maxlen=REPORT_INTERVAL)
+    reward_deque = deque(maxlen=REPORT_INTERVAL)
+    bumps_deque = deque(maxlen=REPORT_INTERVAL)
+    total_bumps = 0
+
+    @TinyJit
+    def jitmodel(x):
+        probs, values = model(x)
+        return probs.realize(), values.realize()
+
+    @TinyJit
+    def compute_loss(states, action_mask, rewards, next_states, dones):
+        probs, state_values = model(states)
+        _, next_state_values = model(next_states)
+        target_values = (rewards + (1 - dones) * next_state_values[:,0] * GAMMA)[:,None]
+        critic_loss = (state_values - target_values).pow(2).mean()
+
+        action_probs = (probs * action_mask).sum(-1)[:,None]
+        action_probs = action_probs.clip(0.01, 1)  # probs nan out without this :(
+        advantages = target_values - state_values
+        actor_loss = -(action_probs.log() * advantages).mean()
+
+        entropy = -(probs * (probs + 1e-5).log()).sum(-1)
+        entropy_loss = -ENTROPY_BETA * entropy.mean()
+
+        loss = actor_loss + critic_loss + entropy_loss
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        return loss.realize()
+
+
+    for episode in range(1, NUM_EPISODES):
+        state = env.reset()
+        ep_loss, ep_reward, ep_bumps = 0, 0, 0
+
+        for step in range(MAX_EPISODE_LEN):
+            probs, _ = jitmodel(Tensor(state)[None])
+            action = np.random.choice(4, p=probs.numpy()[0])
+
+            next_state, reward, done, _ = env.step(action)
+            buffer.push(state, action, reward, next_state, done)
+            state = next_state
+            ep_reward += reward
+            ep_bumps += 1 if reward == -1 else 0
+            if done: break
+
+            if len(buffer) >= BATCH_SIZE:
+                states, actions, rewards, next_states, dones = buffer.sample(BATCH_SIZE)
+                states, rewards, next_states, dones = (Tensor(x) for x in (states, rewards, next_states, dones))
+
+                action_mask = np.zeros((BATCH_SIZE, 4), dtype=np.float32)
+                action_mask[range(BATCH_SIZE), actions] = 1
+                action_mask = Tensor(action_mask)
+
+                loss = compute_loss(states, action_mask, rewards, next_states, dones)
+                ep_loss += loss.numpy()
+
+        loss_deque.append(ep_loss)
+        reward_deque.append(ep_reward)
+        bumps_deque.append(ep_bumps)
+        total_bumps += ep_bumps
+
+        if episode % REPORT_INTERVAL == 0:
+            print(f"Episode: {episode} | "
+                  f"Loss: {np.mean(loss_deque):.3f} | "
+                  f"Avg Reward: {np.mean(reward_deque):.3f} | "
+                  f"Avg Bumps: {np.mean(bumps_deque):.3f} | "
+                  f"Total Bumps: {total_bumps}")
+
+
+if __name__ == "__main__":
+    main()
